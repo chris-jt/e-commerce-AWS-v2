@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shopping-cart
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shopping-cart
+  template:
+    metadata:
+      labels:
+        app: shopping-cart
+    spec:
+      containers:
+      - name: shopping-cart
+        image: ${DOCKER_USERNAME}/shopping-cart:${IMAGE_TAG}
+        ports:
+        - containerPort: 3002
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 15
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 3002  # Ajustar para cada servicio
+    nodePort: 30002   # Usar un puerto único entre 30000-32767 para cada servicio
+  selector:
+    app: ${SERVICE_NAME}

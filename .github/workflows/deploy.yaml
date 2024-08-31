@@ -1,0 +1,211 @@
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_delete:
+        description: 'Type "DEPLOY" to confirm the deploy of the infrastructure'
+        required: true
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: ${GITHUB_REPOSITORY}
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+  CLUSTER_NAME: e-commerce-cluster
+
+jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      merchandise: ${{ steps.filter.outputs.merchandise }}
+      products: ${{ steps.filter.outputs.products }}
+      shopping-cart: ${{ steps.filter.outputs.shopping-cart }}
+      infrastructure: ${{ steps.filter.outputs.infrastructure }}
+    steps:
+    - uses: actions/checkout@v2
+    - uses: dorny/paths-filter@v2
+      id: filter
+      with:
+        filters: |
+          frontend:
+            - 'frontend/**'
+          merchandise:
+            - 'merchandise/**'
+          products:
+            - 'products/**'
+          shopping-cart:
+            - 'shopping-cart/**'
+          infrastructure:
+            - 'cloudformation/**'
+            - '.github/workflows/**'
+
+  build-and-push:
+    needs: check-changes
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [frontend, merchandise, products, shopping-cart]
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Check if service changed
+      id: check
+      run: |
+        changed="${{ needs.check-changes.outputs[matrix.service] }}"
+        if [[ "$changed" == "true" ]]; then
+          echo "::set-output name=should_run::true"
+        else
+          echo "::set-output name=should_run::false"
+        fi
+
+    - name: Configure AWS credentials
+      if: steps.check.outputs.should_run == 'true'
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Login to DockerHub
+      if: steps.check.outputs.should_run == 'true'
+      uses: docker/login-action@v1
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Build, tag, and push image to DockerHub
+      if: steps.check.outputs.should_run == 'true'
+      env:
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        docker build -t ${{ env.DOCKER_USERNAME }}/${{ matrix.service }}:$IMAGE_TAG ./${{ matrix.service }}
+        docker push ${{ env.DOCKER_USERNAME }}/${{ matrix.service }}:$IMAGE_TAG
+
+  deploy-infrastructure:
+    needs: check-changes
+    if: needs.check-changes.outputs.infrastructure == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+  
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+  
+    - name: Deploy EKS cluster
+      run: |
+        aws cloudformation deploy \
+          --template-file cloudformation/eks-cluster.yaml \
+          --stack-name ${{ env.CLUSTER_NAME }} \
+          --parameter-overrides ClusterName=${{ env.CLUSTER_NAME }} \
+          --capabilities CAPABILITY_IAM
+    - name: Verify EKS permissions
+      run: |
+        aws eks list-clusters --region ${{ env.AWS_REGION }}    
+    - name: Verify AWS identity
+      run: |
+        aws sts get-caller-identity 
+
+    - name: Verify EKS cluster
+      run: |
+        aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+    - name: Update kube config
+      run: |
+        aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+        kubectl get svc
+  
+  deploy-to-eks:
+    needs: [check-changes, build-and-push, deploy-infrastructure]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [frontend, merchandise, products, shopping-cart]
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Check if service changed
+      id: check
+      run: |
+        changed="${{ needs.check-changes.outputs[matrix.service] }}"
+        if [[ "$changed" == "true" ]]; then
+          echo "::set-output name=should_run::true"
+        else
+          echo "::set-output name=should_run::false"
+        fi
+
+    - name: Configure AWS credentials
+      if: steps.check.outputs.should_run == 'true'
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+    
+    - name: Configure kubectl
+      run: |
+        aws eks --region us-east-1 update-kubeconfig --name ${{ env.CLUSTER_NAME }}
+      
+    - name: Apply Kubernetes configurations
+      run: |
+        for file in k8s/*.yaml
+        do
+          sed -e 's|${DOCKER_USERNAME}|'"${{ env.DOCKER_USERNAME }}"'|g' \
+              -e 's|${IMAGE_TAG}|'"${{ github.sha }}"'|g' \
+              -e 's|${SERVICE_NAME}|'"$(basename "$file" .yaml)"'|g' "$file" | kubectl apply -f -
+        done
+    
+    - name: Deploy to EKS
+      if: steps.check.outputs.should_run == 'true'
+      env:
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        sed -i 's|${DOCKER_USERNAME}|'${{ env.DOCKER_USERNAME }}'|g' k8s/${{ matrix.service }}.yaml
+        sed -i 's|${IMAGE_TAG}|'$IMAGE_TAG'|g' k8s/${{ matrix.service }}.yaml
+        sed -i 's|${SERVICE_NAME}|'${{ matrix.service }}'|g' k8s/${{ matrix.service }}.yaml
+        kubectl apply -f k8s/${{ matrix.service }}.yaml
+
+    - name: Instalar Controlador de Ingress NGINX
+      run: |
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.0.0/deploy/static/provider/aws/deploy.yaml        
+
+  get-frontend-url:
+    needs: deploy-to-eks
+    runs-on: ubuntu-latest
+    if: needs.check-changes.outputs.frontend == 'true'
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kube config
+      run: |        
+        aws eks update-kubeconfig --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+    
+    - name: Get Frontend URL
+      id: get-frontend-url
+      run: |
+        FRONTEND_URL=$(kubectl get service frontend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        echo "::set-output name=url::$FRONTEND_URL"
+  
+    - name: Print Frontend URL
+      run: echo "Frontend is accessible at:" 
+           echo " http://${{ steps.get-frontend-url.outputs.url }}"
+  
+      # Opcional: guardar la URL como un artefacto
+    - name: Save Frontend URL
+      run: echo "${{ steps.get-frontend-url.outputs.url }}" > frontend_url.txt
+  
+    - name: Upload Frontend URL
+      uses: actions/upload-artifact@v2
+      with:
+        name: frontend-url
+        path: frontend_url.txt

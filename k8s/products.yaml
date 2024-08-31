@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: products
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: products
+  template:
+    metadata:
+      labels:
+        app: products
+    spec:
+      containers:
+      - name: products
+        image: ${DOCKER_USERNAME}/products:${IMAGE_TAG}
+        ports:
+        - containerPort: 3001
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 15
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 3001  # Ajustar para cada servicio
+    nodePort: 30001   # Usar un puerto único entre 30000-32767 para cada servicio
+  selector:
+    app: ${SERVICE_NAME}

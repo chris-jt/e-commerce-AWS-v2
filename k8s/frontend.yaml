@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ${SERVICE_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${SERVICE_NAME}
+    spec:
+      containers:
+      - name: ${SERVICE_NAME}
+        image: ${DOCKER_USERNAME}/${SERVICE_NAME}:${IMAGE_TAG}
+        ports:
+        - containerPort: 3000
+        env:
+        - name: PRODUCTS_SERVICE_URL
+          value: "http://products-service"
+        - name: MERCHANDISE_SERVICE_URL
+          value: "http://merchandise-service"
+        - name: SHOPPING_CART_SERVICE_URL
+          value: "http://shopping-cart-service"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${SERVICE_NAME}
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 3000
+  selector:
+    app: ${SERVICE_NAME}
