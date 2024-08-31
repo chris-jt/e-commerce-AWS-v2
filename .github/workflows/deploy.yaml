@@ -12,7 +12,7 @@ env:
   ECR_REPOSITORY: ${GITHUB_REPOSITORY}
   DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
   DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-  CLUSTER_NAME: e-commerce-cluster
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
 
 jobs:
   check-changes:
